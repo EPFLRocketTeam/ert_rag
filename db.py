@@ -18,7 +18,8 @@ class Database:
         )
 
         self.connection = sqlite3.connect(
-            database_path
+            database_path,
+	    check_same_thread=False,
         )
 
         self.connection.row_factory = (

@@ -16,7 +16,7 @@ DATABASE_PATH = os.getenv(
 )
 
 
-MODEL_NAME = os.getenv(
+EMBEDDING_MODEL = os.getenv(
     "EMBEDDING_MODEL",
     "all-MiniLM-L6-v2",
 )
@@ -87,31 +87,77 @@ def combine_results(
     semantic_results: list[dict],
     keyword_results: list[dict],
 ) -> list[dict]:
-    combined = []
+    """
+    Combine semantic and keyword search results
+    using Reciprocal Rank Fusion (RRF).
+    """
 
-    seen = set()
+    scores = {}
 
-    for result in semantic_results:
-        key = result["id"]
+    results_by_id = {}
 
-        if key not in seen:
-            seen.add(key)
+    k = 60
 
-            combined.append(
-                result
+    for rank, result in enumerate(
+        semantic_results,
+        start=1,
+    ):
+        result_id = result["id"]
+
+        results_by_id[
+            result_id
+        ] = result
+
+        scores[
+            result_id
+        ] = scores.get(
+            result_id,
+            0.0,
+        ) + (
+            1.0
+            / (
+                k
+                + rank
             )
+        )
 
-    for result in keyword_results:
-        key = result["id"]
+    for rank, result in enumerate(
+        keyword_results,
+        start=1,
+    ):
+        result_id = result["id"]
 
-        if key not in seen:
-            seen.add(key)
+        results_by_id[
+            result_id
+        ] = result
 
-            combined.append(
-                result
+        scores[
+            result_id
+        ] = scores.get(
+            result_id,
+            0.0,
+        ) + (
+            1.0
+            / (
+                k
+                + rank
             )
+        )
 
-    return combined
+    ranked_ids = sorted(
+        scores,
+        key=lambda result_id: scores[
+            result_id
+        ],
+        reverse=True,
+    )
+
+    return [
+        results_by_id[
+            result_id
+        ]
+        for result_id in ranked_ids
+    ]
 
 
 def ask_mistral(
@@ -154,7 +200,7 @@ def main():
     )
 
     embedding_model = SentenceTransformer(
-        MODEL_NAME
+        EMBEDDING_MODEL
     )
 
     print(
@@ -236,7 +282,7 @@ def main():
         )
 
         results = results[
-            :10
+            :6
         ]
 
         if not results:
