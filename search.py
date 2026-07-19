@@ -3,6 +3,7 @@ from sentence_transformers import SentenceTransformer
 from db import Database
 
 import os
+from dotenv import load_dotenv
 
 load_dotenv()
 
