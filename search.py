@@ -1,22 +1,101 @@
-import os
-
-from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
 
 from db import Database
 
+import os
 
 load_dotenv()
 
-DATABASE_PATH = os.environ["DATABASE_PATH"]
+DATABASE_PATH = os.getenv(
+    "DATABASE_PATH",
+    "data/rag.db",
+)
+
+MODEL_NAME = os.getenv(
+    "EMBEDDING_MODEL",
+    "all-MiniLM-L6-v2",
+)
+
+def print_result(
+    number: int,
+    result: dict,
+    result_type: str,
+):
+    print()
+    print("=" * 80)
+    print(
+        f"{result_type} RESULT {number}"
+    )
+    print("=" * 80)
+
+    if result_type == "SEMANTIC":
+        print(
+            f"Similarity: "
+            f"{result['similarity']:.4f}"
+        )
+
+    elif result_type == "KEYWORD":
+        print(
+            f"BM25 score: "
+            f"{result['score']:.4f}"
+        )
+
+    print(
+        f"Title: "
+        f"{result['title']}"
+    )
+
+    print(
+        f"Section: "
+        f"{result['heading_path']}"
+    )
+
+    print(
+        f"Path: "
+        f"{result['path']}"
+    )
+
+    print(
+        f"URL: "
+        f"{result['url']}"
+    )
+
+    print()
+
+    print(
+        result["content"]
+    )
 
 
 def main():
-    db = Database(DATABASE_PATH)
+    print(
+        "Loading embedding model..."
+    )
+
+    model = SentenceTransformer(
+        MODEL_NAME
+    )
+
+    print(
+        "Embedding model loaded."
+    )
+
+    db = Database(
+        DATABASE_PATH
+    )
 
     while True:
-        query = input(
-            "\nSearch (or 'exit'): "
-        ).strip()
+        try:
+            query = input(
+                "\nSearch (or 'exit'): "
+            ).strip()
+
+        except (
+            EOFError,
+            KeyboardInterrupt,
+        ):
+            print()
+            break
 
         if query.lower() == "exit":
             break
@@ -24,46 +103,93 @@ def main():
         if not query:
             continue
 
-        results = db.search(
-            query,
-            limit=10,
+        print()
+        print(
+            "Generating query embedding..."
         )
 
-        if not results:
-            print("No results.")
-            continue
+        query_embedding = model.encode(
+            query,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
 
-        for index, result in enumerate(
-            results,
-            start=1,
-        ):
-            print("\n" + "=" * 80)
+        semantic_results = (
+            db.semantic_search(
+                query_embedding=query_embedding,
+                limit=5,
+            )
+        )
 
+        keyword_rows = db.search(
+            query=query,
+            limit=5,
+        )
+
+        keyword_results = [
+            dict(row)
+            for row in keyword_rows
+        ]
+
+        print()
+        print(
+            "\n"
+            + "#" * 80
+        )
+
+        print(
+            "SEMANTIC SEARCH RESULTS"
+        )
+
+        print(
+            "#" * 80
+        )
+
+        if not semantic_results:
             print(
-                f"{index}. "
-                f"{result['title']}"
+                "No semantic results found."
             )
 
+        else:
+            for index, result in enumerate(
+                semantic_results,
+                start=1,
+            ):
+                print_result(
+                    number=index,
+                    result=result,
+                    result_type="SEMANTIC",
+                )
+
+        print()
+        print(
+            "\n"
+            + "#" * 80
+        )
+
+        print(
+            "KEYWORD SEARCH RESULTS"
+        )
+
+        print(
+            "#" * 80
+        )
+
+        if not keyword_results:
             print(
-                f"Section: "
-                f"{result['heading_path']}"
+                "No keyword results found."
             )
 
-            print(
-                f"Path: "
-                f"{result['path']}"
-            )
-
-            print(
-                f"URL: "
-                f"{result['url']}"
-            )
-
-            print()
-
-            print(
-                result["content"][:1500]
-            )
+        else:
+            for index, result in enumerate(
+                keyword_results,
+                start=1,
+            ):
+                print_result(
+                    number=index,
+                    result=result,
+                    result_type="KEYWORD",
+                )
 
 
 if __name__ == "__main__":
