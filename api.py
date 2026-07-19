@@ -94,3 +94,21 @@ def search(
         "query": request.query,
         "results": results,
     }
+
+@app.get("/search")
+def search_get(query: str):
+    query_embedding = model.encode(
+        query,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    )
+
+    results = db.semantic_search(
+        query_embedding=query_embedding,
+        limit=5,
+    )
+
+    return {
+        "query": query,
+        "results": results,
+    }
