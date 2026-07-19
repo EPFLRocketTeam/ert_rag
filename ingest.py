@@ -1,177 +1,355 @@
 import hashlib
 import os
+import subprocess
 from pathlib import Path
 
 from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
 
 from db import Database
-from git_sync import (
-    clone_or_pull,
-    get_changed_files,
-    get_current_commit,
-)
 from markdown_parser import parse_markdown
 
 
 load_dotenv()
 
 
-REPO_URL = os.environ["WIKI_REPO_URL"]
-REPO_PATH = os.environ["WIKI_REPO_PATH"]
-DATABASE_PATH = os.environ["DATABASE_PATH"]
-WIKI_BASE_URL = os.environ["WIKI_BASE_URL"].rstrip("/")
+REPOSITORY_PATH = Path(
+    os.getenv(
+        "REPOSITORY_PATH",
+        "data/wiki",
+    )
+)
+
+DATABASE_PATH = os.getenv(
+    "DATABASE_PATH",
+    "data/rag.db",
+)
+
+REPOSITORY_URL = os.getenv(
+    "REPOSITORY_URL",
+    "git@github.com:EPFLRocketTeam/ert_wiki.git",
+)
+
+WIKI_BASE_URL = os.getenv(
+    "WIKI_BASE_URL",
+    "https://rocket-team.epfl.ch",
+)
+
+MODEL_NAME = os.getenv(
+    "EMBEDDING_MODEL",
+    "all-MiniLM-L6-v2",
+)
 
 
-def sha256(content: str) -> str:
-    return hashlib.sha256(
-        content.encode("utf-8")
-    ).hexdigest()
+def run_git(
+    *arguments: str,
+) -> str:
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPOSITORY_PATH),
+            *arguments,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    return result.stdout.strip()
 
 
-def create_page_url(path: str) -> str:
-    """
-    Converts a Git path like:
+def synchronize_repository():
+    if not REPOSITORY_PATH.exists():
+        print(
+            "Cloning Git repository..."
+        )
 
-        avionics/flight-computer.md
+        REPOSITORY_PATH.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
-    into:
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                REPOSITORY_URL,
+                str(REPOSITORY_PATH),
+            ],
+            check=True,
+        )
 
-        https://wiki.example.com/avionics/flight-computer
-    """
+    else:
+        print(
+            "Synchronizing Git repository..."
+        )
 
-    path_without_extension = os.path.splitext(path)[0]
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPOSITORY_PATH),
+                "pull",
+                "--ff-only",
+            ],
+            check=True,
+        )
+
+
+def get_file_hash(
+    path: Path,
+) -> str:
+    hasher = hashlib.sha256()
+
+    with path.open(
+        "rb"
+    ) as file:
+        while True:
+            chunk = file.read(
+                1024 * 1024
+            )
+
+            if not chunk:
+                break
+
+            hasher.update(
+                chunk
+            )
+
+    return hasher.hexdigest()
+
+
+def build_wiki_url(
+    path: Path,
+) -> str:
+    relative_path = path.relative_to(
+        REPOSITORY_PATH
+    )
+
+    relative_path_without_extension = (
+        relative_path.with_suffix("")
+    )
 
     return (
         f"{WIKI_BASE_URL}/"
-        f"{path_without_extension}"
+        f"{relative_path_without_extension}"
     )
 
 
 def process_file(
     db: Database,
-    repo_path: str,
-    relative_path: str,
+    model: SentenceTransformer,
+    path: Path,
     commit_hash: str,
 ):
-    file_path = Path(repo_path) / relative_path
-
-    if not file_path.exists():
-        print(f"File does not exist: {relative_path}")
-        return
-
-    markdown = file_path.read_text(
-        encoding="utf-8"
+    relative_path = path.relative_to(
+        REPOSITORY_PATH
     )
 
-    content_hash = sha256(markdown)
-
-    existing = db.get_document(relative_path)
-
-    # Avoid reprocessing if content did not actually change.
-    if (
-        existing
-        and existing["content_hash"] == content_hash
-    ):
-        print(
-            f"Skipping unchanged file: "
-            f"{relative_path}"
-        )
-
-        return
-
-    title, chunks = parse_markdown(markdown)
-
-    if not chunks:
-        print(
-            f"Skipping empty file: "
-            f"{relative_path}"
-        )
-
-        return
-
-    url = create_page_url(relative_path)
-
-    db.insert_document(
-        path=relative_path,
-        content_hash=content_hash,
-        title=title,
-        url=url,
-        git_commit=commit_hash,
-        chunks=chunks,
+    relative_path_string = str(
+        relative_path
     )
 
     print(
-        f"Indexed {relative_path}: "
+        f"A: {relative_path_string}"
+    )
+
+    markdown = path.read_text(
+        encoding="utf-8"
+    )
+
+    document = parse_markdown(
+        markdown
+    )
+
+    chunks = document["chunks"]
+
+    if not chunks:
+        print(
+            f"Skipping empty document: "
+            f"{relative_path_string}"
+        )
+
+        return
+
+    texts = [
+        chunk["content"]
+        for chunk in chunks
+    ]
+
+    print(
+        f"Generating embeddings for "
+        f"{len(texts)} chunks..."
+    )
+
+    embeddings = model.encode(
+        texts,
+        show_progress_bar=False,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    )
+
+    content_hash = get_file_hash(
+        path
+    )
+
+    db.insert_document(
+        path=relative_path_string,
+        content_hash=content_hash,
+        title=document["title"],
+        url=build_wiki_url(path),
+        git_commit=commit_hash,
+        chunks=chunks,
+        embeddings=embeddings,
+    )
+
+    print(
+        f"Indexed {relative_path_string}: "
         f"{len(chunks)} chunks"
     )
 
 
+def get_changed_files(
+    previous_commit: str | None,
+    current_commit: str,
+) -> list[str]:
+    if previous_commit is None:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPOSITORY_PATH),
+                "ls-files",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        return [
+            path
+            for path in result.stdout.splitlines()
+            if path.endswith(
+                ".md"
+            )
+        ]
+
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPOSITORY_PATH),
+            "diff",
+            "--name-only",
+            previous_commit,
+            current_commit,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    return [
+        path
+        for path in result.stdout.splitlines()
+        if path.endswith(
+            ".md"
+        )
+    ]
+
+
 def main():
-    print("Synchronizing Git repository...")
+    synchronize_repository()
 
-    clone_or_pull(
-        REPO_URL,
-        REPO_PATH,
+    db = Database(
+        DATABASE_PATH
     )
 
-    current_commit = get_current_commit(
-        REPO_PATH
+    print(
+        "Loading embedding model..."
     )
 
-    db = Database(DATABASE_PATH)
-
-    old_commit = db.get_indexed_commit(
-        REPO_URL
+    model = SentenceTransformer(
+        MODEL_NAME
     )
 
-    print(f"Previous indexed commit: {old_commit}")
-    print(f"Current repository commit: {current_commit}")
+    print(
+        "Embedding model loaded."
+    )
 
-    if old_commit == current_commit:
-        print("No new commits.")
+    previous_commit = (
+        db.get_indexed_commit(
+            str(REPOSITORY_PATH)
+        )
+    )
+
+    current_commit = run_git(
+        "rev-parse",
+        "HEAD",
+    )
+
+    print(
+        f"Previous indexed commit: "
+        f"{previous_commit}"
+    )
+
+    print(
+        f"Current repository commit: "
+        f"{current_commit}"
+    )
+
+    if previous_commit == current_commit:
+        print(
+            "Repository has not changed."
+        )
+
         return
 
     changed_files = get_changed_files(
-        REPO_PATH,
-        old_commit,
+        previous_commit,
         current_commit,
     )
 
     print(
-        f"Found {len(changed_files)} changed files."
+        f"Found {len(changed_files)} "
+        f"changed files."
     )
 
-    for status, relative_path in changed_files:
-        print(
-            f"{status}: {relative_path}"
+    for file_path in changed_files:
+        absolute_path = (
+            REPOSITORY_PATH
+            / file_path
         )
 
-        if status == "D":
-            db.delete_document(
-                relative_path
-            )
-
+        if not absolute_path.exists():
             print(
-                f"Deleted from index: "
-                f"{relative_path}"
+                f"Deleting removed document: "
+                f"{file_path}"
             )
 
-        elif status in {"A", "M"}:
-            process_file(
-                db,
-                REPO_PATH,
-                relative_path,
-                current_commit,
+            db.delete_document(
+                file_path
             )
 
-    # Only update the commit AFTER everything succeeded.
+            continue
+
+        process_file(
+            db=db,
+            model=model,
+            path=absolute_path,
+            commit_hash=current_commit,
+        )
+
     db.set_indexed_commit(
-        REPO_URL,
-        current_commit,
+        repository=str(
+            REPOSITORY_PATH
+        ),
+        commit_hash=current_commit,
     )
 
     print(
-        f"Ingestion complete. "
+        "Ingestion complete. "
         f"Indexed commit {current_commit}"
     )
 

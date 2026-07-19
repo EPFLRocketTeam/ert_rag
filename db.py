@@ -2,10 +2,17 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 
 class Database:
-    def __init__(self, database_path: str):
-        Path(database_path).parent.mkdir(
+    def __init__(
+        self,
+        database_path: str,
+    ):
+        Path(
+            database_path
+        ).parent.mkdir(
             parents=True,
             exist_ok=True,
         )
@@ -14,7 +21,9 @@ class Database:
             database_path
         )
 
-        self.connection.row_factory = sqlite3.Row
+        self.connection.row_factory = (
+            sqlite3.Row
+        )
 
         self.connection.execute(
             "PRAGMA journal_mode=WAL"
@@ -51,6 +60,8 @@ class Database:
                 title TEXT,
                 heading_path TEXT NOT NULL,
                 content TEXT NOT NULL,
+
+                embedding BLOB,
 
                 FOREIGN KEY(path)
                     REFERENCES documents(path)
@@ -139,6 +150,25 @@ class Database:
             """
         )
 
+        columns = self.connection.execute(
+            """
+            PRAGMA table_info(chunks)
+            """
+        ).fetchall()
+
+        column_names = {
+            column["name"]
+            for column in columns
+        }
+
+        if "embedding" not in column_names:
+            self.connection.execute(
+                """
+                ALTER TABLE chunks
+                ADD COLUMN embedding BLOB
+                """
+            )
+
         self.connection.commit()
 
     def get_indexed_commit(
@@ -206,6 +236,41 @@ class Database:
         self,
         path: str,
     ):
+        chunk_ids = self.connection.execute(
+            """
+            SELECT id
+            FROM chunks
+            WHERE path = ?
+            """,
+            (
+                path,
+            ),
+        ).fetchall()
+
+        for chunk in chunk_ids:
+            self.connection.execute(
+                """
+                INSERT INTO chunks_fts(
+                    chunks_fts,
+                    rowid,
+                    title,
+                    heading_path,
+                    content
+                )
+                SELECT
+                    'delete',
+                    id,
+                    title,
+                    heading_path,
+                    content
+                FROM chunks
+                WHERE id = ?
+                """,
+                (
+                    chunk["id"],
+                ),
+            )
+
         self.connection.execute(
             """
             DELETE FROM chunks
@@ -236,8 +301,11 @@ class Database:
         url: str,
         git_commit: str,
         chunks: list[dict],
+        embeddings: np.ndarray,
     ):
-        self.delete_document(path)
+        self.delete_document(
+            path
+        )
 
         self.connection.execute(
             """
@@ -259,7 +327,18 @@ class Database:
             ),
         )
 
-        for index, chunk in enumerate(chunks):
+        for index, chunk in enumerate(
+            chunks
+        ):
+            embedding = np.asarray(
+                embeddings[index],
+                dtype=np.float32,
+            )
+
+            embedding_blob = (
+                embedding.tobytes()
+            )
+
             self.connection.execute(
                 """
                 INSERT INTO chunks(
@@ -267,9 +346,10 @@ class Database:
                     chunk_index,
                     title,
                     heading_path,
-                    content
+                    content,
+                    embedding
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     path,
@@ -277,6 +357,7 @@ class Database:
                     title,
                     chunk["heading_path"],
                     chunk["content"],
+                    embedding_blob,
                 ),
             )
 
@@ -357,13 +438,11 @@ class Database:
 
         query_parts = []
 
-        # Exact phrase match.
         if len(safe_words) > 1:
             query_parts.append(
                 f'"{phrase}"'
             )
 
-        # Individual meaningful terms.
         for word in meaningful_words:
             query_parts.append(
                 f'"{word}"'
@@ -412,3 +491,91 @@ class Database:
                 limit,
             ),
         ).fetchall()
+
+    def semantic_search(
+        self,
+        query_embedding: np.ndarray,
+        limit: int = 10,
+    ):
+        query_embedding = np.asarray(
+            query_embedding,
+            dtype=np.float32,
+        )
+
+        query_norm = np.linalg.norm(
+            query_embedding
+        )
+
+        if query_norm == 0:
+            return []
+
+        rows = self.connection.execute(
+            """
+            SELECT
+                chunks.id,
+                chunks.path,
+                chunks.title,
+                chunks.heading_path,
+                chunks.content,
+                chunks.embedding,
+                documents.url
+
+            FROM chunks
+
+            JOIN documents
+                ON documents.path = chunks.path
+
+            WHERE chunks.embedding IS NOT NULL
+            """
+        ).fetchall()
+
+        results = []
+
+        for row in rows:
+            embedding = np.frombuffer(
+                row["embedding"],
+                dtype=np.float32,
+            )
+
+            embedding_norm = np.linalg.norm(
+                embedding
+            )
+
+            if embedding_norm == 0:
+                continue
+
+            similarity = float(
+                np.dot(
+                    query_embedding,
+                    embedding,
+                )
+                / (
+                    query_norm
+                    * embedding_norm
+                )
+            )
+
+            results.append(
+                (
+                    similarity,
+                    row,
+                )
+            )
+
+        results.sort(
+            key=lambda result: result[0],
+            reverse=True,
+        )
+
+        return [
+            {
+                "similarity": similarity,
+                "id": row["id"],
+                "path": row["path"],
+                "title": row["title"],
+                "heading_path": row["heading_path"],
+                "content": row["content"],
+                "url": row["url"],
+            }
+            for similarity, row in results[:limit]
+        ]

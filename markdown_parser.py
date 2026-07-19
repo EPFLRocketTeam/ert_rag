@@ -1,8 +1,24 @@
 from markdown_it import MarkdownIt
 
 
-def parse_markdown(markdown: str) -> tuple[str, list[dict]]:
+def parse_markdown(markdown: str) -> dict:
+    """
+    Parse a Markdown document into semantic chunks.
+
+    Returns:
+        {
+            "title": str,
+            "chunks": [
+                {
+                    "heading_path": str,
+                    "content": str,
+                }
+            ],
+        }
+    """
+
     md = MarkdownIt()
+
     tokens = md.parse(markdown)
 
     title = None
@@ -14,12 +30,16 @@ def parse_markdown(markdown: str) -> tuple[str, list[dict]]:
     def flush_content():
         nonlocal current_content
 
-        content = "\n".join(current_content).strip()
+        content = "\n".join(
+            current_content
+        ).strip()
 
         if content:
             chunks.append(
                 {
-                    "heading_path": " > ".join(heading_stack),
+                    "heading_path": " > ".join(
+                        heading_stack
+                    ),
                     "content": content,
                 }
             )
@@ -34,43 +54,66 @@ def parse_markdown(markdown: str) -> tuple[str, list[dict]]:
         if token.type == "heading_open":
             flush_content()
 
-            level = int(token.tag[1])
+            level = int(
+                token.tag[1:]
+            )
 
-            # The heading text is in the next token.
-            heading_token = tokens[i + 1]
+            heading_text = ""
 
-            heading_text = heading_token.content.strip()
+            if (
+                i + 1 < len(tokens)
+                and tokens[i + 1].type == "inline"
+            ):
+                heading_text = (
+                    tokens[i + 1]
+                    .content
+                    .strip()
+                )
 
-            # Remove headings at the same or deeper level.
             while len(heading_stack) >= level:
                 heading_stack.pop()
 
-            heading_stack.append(heading_text)
+            heading_stack.append(
+                heading_text
+            )
 
-            if title is None and level == 1:
+            if (
+                title is None
+                and level == 1
+            ):
                 title = heading_text
 
             i += 3
+
             continue
 
         if token.type == "inline":
-            current_content.append(token.content)
+            if token.content.strip():
+                current_content.append(
+                    token.content.strip()
+                )
 
         elif token.type == "fence":
             language = token.info.strip()
 
             if language:
                 current_content.append(
-                    f"```{language}\n{token.content}```"
+                    f"```{language}\n"
+                    f"{token.content}"
+                    f"```"
                 )
             else:
                 current_content.append(
-                    f"```\n{token.content}```"
+                    f"```\n"
+                    f"{token.content}"
+                    f"```"
                 )
 
         elif token.type == "code_block":
             current_content.append(
-                f"```\n{token.content}```"
+                f"```\n"
+                f"{token.content}"
+                f"```"
             )
 
         i += 1
@@ -80,4 +123,7 @@ def parse_markdown(markdown: str) -> tuple[str, list[dict]]:
     if title is None:
         title = "Untitled"
 
-    return title, chunks
+    return {
+        "title": title,
+        "chunks": chunks,
+    }
