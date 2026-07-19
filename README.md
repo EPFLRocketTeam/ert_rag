@@ -14,7 +14,7 @@ The system is designed for a team of approximately 250 members and is built arou
 
 The EPFL Rocket Team has a large amount of documentation spread across many technical and management areas.
 
-Instead of manually searching through hundreds of Wiki.js pages, a team member should eventually be able to ask a question such as:
+Instead of manually searching through hundreds of Wiki.js pages, a team member can ask a question such as:
 
 > What is our biggest rocket?
 
@@ -22,84 +22,98 @@ or:
 
 > How do I access the team's servers?
 
-The system will search the team's existing documentation, find the most relevant information, and provide it to an AI model that can formulate an answer.
+The system searches the team's existing documentation and finds the most relevant information.
+
+The current system provides semantic search through a REST API. The next step is to pass the retrieved documentation to a large language model to generate complete answers.
 
 The original documentation remains the source of truth.
 
-The AI assistant is intended to make the information easier to find, not to replace the Wiki.js documentation.
+The AI assistant is intended to make information easier to find, not to replace the Wiki.js documentation.
 
 ---
 
-## How it works
-
-The current system works approximately like this:
+## Current architecture
 
 ```text
-┌────────────────────┐
-│      Wiki.js       │
-│  Team documentation│
-└─────────┬──────────┘
-          │
-          │ Git repository
-          ▼
-┌────────────────────┐
-│   Local Git clone  │
-│    Markdown files  │
-└─────────┬──────────┘
-          │
-          │ Ingestion
-          ▼
-┌────────────────────┐
-│     Chunking       │
-│ Split documents    │
-│ into smaller parts │
-└─────────┬──────────┘
-          │
-          ▼
-┌────────────────────┐
-│      SQLite        │
-│ Documents + chunks │
-└─────────┬──────────┘
-          │
-          ▼
-┌────────────────────┐
-│      SQLite        │
-│       FTS5         │
-│  Full-text search  │
-└─────────┬──────────┘
-          │
-          ▼
-┌────────────────────┐
-│   Search results   │
-└────────────────────┘
+                         ┌──────────────────────┐
+                         │       Wiki.js        │
+                         │  Team documentation  │
+                         └──────────┬───────────┘
+                                    │
+                                    │ Git repository
+                                    ▼
+                         ┌──────────────────────┐
+                         │    Local Git clone   │
+                         │    Markdown files    │
+                         └──────────┬───────────┘
+                                    │
+                                    │ Ingestion
+                                    ▼
+                         ┌──────────────────────┐
+                         │      Chunking        │
+                         │  Split documents     │
+                         │  into smaller parts  │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
+                         ┌──────────────────────┐
+                         │       SQLite         │
+                         │ Documents + chunks   │
+                         └──────────┬───────────┘
+                                    │
+                      ┌─────────────┴─────────────┐
+                      ▼                           ▼
+             ┌────────────────┐          ┌────────────────┐
+             │  SQLite FTS5   │          │   Embeddings   │
+             │ Keyword search │          │ Semantic search│
+             └────────┬───────┘          └────────┬───────┘
+                      │                           │
+                      └─────────────┬─────────────┘
+                                    ▼
+                         ┌──────────────────────┐
+                         │   Search results     │
+                         │  Relevant chunks     │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
+                         ┌──────────────────────┐
+                         │      FastAPI         │
+                         │      REST API        │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
+                    https://rag.epfl-rocket-team.ch
 ```
 
-The future system will extend this with semantic search and an AI model:
+The planned question-answering layer will extend this architecture:
 
 ```text
 User question
       │
       ▼
 ┌────────────────────┐
-│   Search system    │
+│     FastAPI API    │
 └─────────┬──────────┘
           │
-          ├──────────────────────┐
-          ▼                      ▼
-┌────────────────┐      ┌────────────────┐
-│ Keyword search │      │ Semantic search│
-│     FTS5        │      │   Embeddings   │
-└────────┬───────┘      └────────┬───────┘
-         │                       │
-         └───────────┬───────────┘
-                     ▼
-             Relevant documents
-                     │
-                     ▼
-              AI language model
-                     │
-                     ▼
-                  Answer
+          ▼
+┌────────────────────────────┐
+│       Hybrid retrieval     │
+│                            │
+│  Keyword search + semantic │
+│       search + reranking   │
+└─────────────┬──────────────┘
+              │
+              ▼
+       Relevant chunks
+              │
+              ▼
+        Mistral API
+              │
+              ▼
+           Answer
+              │
+              ▼
+      Sources and citations
 ```
 
 ---
@@ -165,10 +179,11 @@ For every document, the system:
 2. Extracts the document title.
 3. Identifies headings.
 4. Splits the document into smaller chunks.
-5. Stores the chunks in the database.
-6. Associates each chunk with its original document and URL.
+5. Generates an embedding for each chunk.
+6. Stores the chunks in the database.
+7. Associates each chunk with its original document and URL.
 
-The system is designed to support incremental updates.
+The system supports incremental updates.
 
 When a Wiki.js document changes:
 
@@ -185,10 +200,15 @@ git pull
 Changed Markdown file
    │
    ▼
-Re-index that document
+Re-index changed document
+   │
+   ▼
+Update database
 ```
 
 There is no need to reprocess the entire Wiki.js documentation every time one page changes.
+
+The ingestion system tracks the previously indexed Git commit and detects changed files.
 
 ---
 
@@ -231,6 +251,7 @@ Each chunk stores metadata such as:
 * Heading path
 * Original URL
 * Content
+* Embedding
 
 ---
 
@@ -248,6 +269,10 @@ Information about original Markdown files.
 
 The smaller pieces created during ingestion.
 
+### Embeddings
+
+Numerical vector representations of chunks used for semantic similarity search.
+
 ### Full-text search index
 
 An SQLite FTS5 index is used to search the text efficiently.
@@ -258,9 +283,11 @@ This means the database itself is derived data rather than the primary source of
 
 ---
 
-## Full-text search
+# Search
 
-The current implementation uses SQLite FTS5.
+## Keyword search
+
+The system uses SQLite FTS5 for full-text search.
 
 For example, a query such as:
 
@@ -278,34 +305,11 @@ The search results include:
 * Wiki.js URL
 * Relevant content
 
-This allows users and future AI components to trace results back to the original documentation.
-
 ---
 
-# Planned semantic search
+## Semantic search
 
-Keyword search has an important limitation.
-
-A user might ask:
-
-> What is our biggest rocket?
-
-The documentation may contain information about:
-
-* Hyperion
-* Firehorn
-* Weisshorn
-* Nordend
-* rocket dimensions
-* rocket mass
-
-without ever containing the exact phrase:
-
-```text
-biggest rocket
-```
-
-Semantic search addresses this problem.
+The system also uses embeddings to find conceptually similar documentation.
 
 Instead of only looking for matching words, the system converts text into numerical representations called embeddings.
 
@@ -315,16 +319,52 @@ Conceptually:
 "What is our biggest rocket?"
               │
               ▼
-       Question embedding
+       Query embedding
               │
               ▼
-Compare with document embeddings
+   Compare with chunk embeddings
               │
               ▼
-Find semantically similar content
+    Find semantically similar
+           content
 ```
 
-The planned system will combine:
+The current embedding model is configured through the `EMBEDDING_MODEL` environment variable.
+
+The default model is:
+
+```text
+all-MiniLM-L6-v2
+```
+
+The embedding model is used both during ingestion and when generating query embeddings.
+
+Embeddings are normalized, allowing cosine similarity to be used for ranking.
+
+---
+
+## Hybrid retrieval
+
+The system currently exposes both retrieval mechanisms:
+
+```text
+              User query
+                  │
+        ┌─────────┴─────────┐
+        ▼                   ▼
+   Keyword search     Semantic search
+      FTS5              Embeddings
+        │                   │
+        └─────────┬─────────┘
+                  ▼
+          Search results
+```
+
+The current API endpoint returns semantic search results.
+
+The keyword search functionality is also implemented in the database layer and can be combined with semantic results in a future retrieval-ranking stage.
+
+A future hybrid retrieval system will combine both methods:
 
 ```text
 Keyword search
@@ -332,39 +372,185 @@ Keyword search
 Semantic search
       │
       ▼
-Hybrid retrieval
+Result fusion / reranking
+      │
+      ▼
+Best relevant chunks
 ```
 
 This should provide better results than either method alone.
 
 ---
 
+# REST API
+
+The search system is exposed through a FastAPI REST API.
+
+The production API is available at:
+
+```text
+https://rag.epfl-rocket-team.ch
+```
+
+## Root endpoint
+
+```http
+GET /
+```
+
+Example response:
+
+```json
+{
+  "name": "EPFL Rocket Team RAG API",
+  "status": "running"
+}
+```
+
+---
+
+## Health endpoint
+
+```http
+GET /health
+```
+
+Example response:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+---
+
+## Semantic search endpoint
+
+```http
+POST /search
+```
+
+Request:
+
+```json
+{
+  "query": "How do I access the servers?",
+  "limit": 5
+}
+```
+
+Example using `curl`:
+
+```bash
+curl -X POST \
+  "https://rag.epfl-rocket-team.ch/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "How do I access the servers?",
+    "limit": 5
+  }'
+```
+
+The API returns relevant documentation chunks together with their similarity scores and source URLs.
+
+Example:
+
+```json
+{
+  "query": "How do I access the servers?",
+  "results": [
+    {
+      "similarity": 0.4461,
+      "id": 21359,
+      "path": "competition/firehorn/ground-segment/control-station/2024_C_GS_GSC_DJF.md",
+      "title": "Introduction",
+      "heading_path": "Software Design > Software Components Design > Aspects of Each Component > Server",
+      "content": "...",
+      "url": "https://rocket-team.epfl.ch/..."
+    }
+  ]
+}
+```
+
+FastAPI automatically generates interactive API documentation at:
+
+```text
+/docs
+```
+
+---
+
 # Planned AI question answering
 
-The eventual question-answering system will work approximately like this:
+The next major layer is a question-answering endpoint.
+
+The planned flow is:
 
 ```text
 User asks a question
         │
         ▼
-Search the knowledge base
+   Generate query
+     embedding
         │
         ▼
-Retrieve relevant chunks
+ Search knowledge base
         │
         ▼
-Send relevant context to an LLM
+ Retrieve relevant chunks
         │
         ▼
-Generate an answer
+ Build context
         │
         ▼
-Show sources
+ Send context to Mistral API
+        │
+        ▼
+ Generate answer
+        │
+        ▼
+ Return answer + sources
 ```
 
-The AI model should answer based on retrieved documentation rather than relying only on its internal knowledge.
+The planned API will look approximately like:
 
-The original Wiki.js pages should remain available as sources.
+```http
+POST /ask
+```
+
+Request:
+
+```json
+{
+  "query": "How do I access the servers?"
+}
+```
+
+Response:
+
+```json
+{
+  "query": "How do I access the servers?",
+  "answer": "According to the documentation...",
+  "sources": [
+    {
+      "title": "How to Flash Boards",
+      "url": "https://rocket-team.epfl.ch/..."
+    }
+  ]
+}
+```
+
+The LLM will receive retrieved documentation as context and should answer based primarily on that context rather than relying only on its internal knowledge.
+
+The planned LLM backend is the Mistral API, using a Ministral model such as:
+
+```text
+ministral-14b-2512
+```
+
+The API key is stored in environment variables and is not committed to the repository.
 
 ---
 
@@ -374,7 +560,7 @@ The original Wiki.js pages should remain available as sources.
 
 * [x] Clone Wiki.js documentation repository
 * [x] Read Markdown documentation
-* [x] Process hundreds of Markdown documents
+* [x] Process thousands of Markdown files
 * [x] Split documents into chunks
 * [x] Store document metadata
 * [x] Store chunk metadata
@@ -382,22 +568,29 @@ The original Wiki.js pages should remain available as sources.
 * [x] Use SQLite as the database
 * [x] Implement SQLite FTS5 full-text search
 * [x] Search the documentation from the command line
-* [x] Preserve the original document paths
+* [x] Preserve original document paths
 * [x] Support incremental document ingestion
+* [x] Generate embeddings for document chunks
+* [x] Generate query embeddings
+* [x] Implement semantic similarity search
+* [x] Expose semantic search through FastAPI
+* [x] Add health-check endpoint
+* [x] Deploy the API behind `rag.epfl-rocket-team.ch`
+* [x] Generate automatic OpenAPI documentation
 
 ## Next
 
-* [ ] Add semantic embeddings
-* [ ] Implement vector similarity search
-* [ ] Implement hybrid keyword + semantic search
+* [ ] Implement hybrid keyword + semantic retrieval
 * [ ] Improve retrieval ranking
-* [ ] Add a question-answering API
-* [ ] Add an LLM backend
-* [ ] Return citations and source links
+* [ ] Add result reranking
+* [ ] Add `/ask` question-answering endpoint
+* [ ] Add Mistral LLM backend
+* [ ] Return generated answers with citations
 * [ ] Build a web chat interface
 * [ ] Add authentication
 * [ ] Automate Wiki.js Git updates
 * [ ] Add monitoring and logging
+* [ ] Add retrieval-quality evaluation
 
 ## Future ideas
 
@@ -413,6 +606,8 @@ Potential future improvements include:
 * Local LLM support
 * Browser-based LLM support
 * Model comparison and evaluation
+* MCP server integration
+* Integration with Flowise or other AI orchestration systems
 
 These are ideas for future development and are not necessarily part of the current architecture.
 
@@ -422,11 +617,32 @@ These are ideas for future development and are not necessarily part of the curre
 
 ## Requirements
 
-* Python 3
+* Python 3.12+
 * `uv`
 * Git
 
 The project uses `uv` for Python environment and dependency management.
+
+---
+
+## Environment variables
+
+Configuration is provided through environment variables.
+
+Example:
+
+```env
+DATABASE_PATH=data/rag.db
+EMBEDDING_MODEL=all-MiniLM-L6-v2
+```
+
+The Mistral API key is kept outside the repository:
+
+```env
+MISTRAL_API_KEY=...
+```
+
+Environment files containing secrets must not be committed to Git.
 
 ---
 
@@ -444,33 +660,48 @@ Run ingestion:
 uv run python ingest.py
 ```
 
-Run search:
+Run command-line search:
 
 ```bash
 uv run python search.py
 ```
 
-Example:
+Run the API locally:
+
+```bash
+uv run uvicorn api:app \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+The API will then be available locally at:
 
 ```text
-Search (or 'exit'): it team
+http://127.0.0.1:8000
+```
+
+Interactive API documentation:
+
+```text
+http://127.0.0.1:8000/docs
 ```
 
 ---
 
 # Updating the knowledge base
 
-The planned update workflow is:
+The update workflow is:
 
 ```text
 1. Pull changes from the Wiki.js Git repository
 2. Detect changed Markdown files
-3. Re-index changed files
-4. Remove deleted documents
-5. Update the search index
+3. Generate embeddings for changed files
+4. Re-index changed files
+5. Remove deleted documents
+6. Update the search index
 ```
 
-This can eventually be run automatically using a cron job or system service.
+The ingestion system tracks the previously indexed Git commit.
 
 For example:
 
@@ -481,11 +712,16 @@ Every 10 minutes
      git pull
         │
         ▼
- Detect changes
+  Detect changes
         │
         ▼
- Update index
+ Generate embeddings
+        │
+        ▼
+    Update index
 ```
+
+This can eventually be automated using a cron job, system service, container restart workflow, or scheduled deployment.
 
 ---
 
@@ -513,7 +749,7 @@ SQLite
 
 is currently sufficient for the first version.
 
-A distributed vector database may become useful later, but is not necessary just because the project is an AI project.
+A distributed vector database may become useful later, but is not necessary simply because the project is an AI project.
 
 ---
 
@@ -547,8 +783,35 @@ A future IT team should be able to understand and operate the project without re
 
 # Project status
 
-This project is currently in the early development phase.
+This project has progressed from an initial ingestion prototype into a working semantic search service.
 
-The initial ingestion and full-text search pipeline is operational.
+The current system:
 
-The next major milestone is hybrid retrieval combining keyword search with semantic embeddings.
+```text
+Wiki.js Git repository
+        │
+        ▼
+Incremental ingestion
+        │
+        ▼
+Markdown chunking
+        │
+        ▼
+Embedding generation
+        │
+        ▼
+SQLite database
+        │
+        ▼
+Semantic search
+        │
+        ▼
+FastAPI REST API
+        │
+        ▼
+rag.epfl-rocket-team.ch
+```
+
+The next major milestone is to combine the retrieval system with a Mistral language model to provide complete answers grounded in the EPFL Rocket Team's documentation.
+
+The long-term goal is to make the team's existing knowledge significantly easier to discover while keeping the original Wiki.js documentation as the authoritative source.
